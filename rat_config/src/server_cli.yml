@@ -1,0 +1,17 @@
+name: rat_server
+version: "0.1"
+author: Isaac Sikkema
+about: Rust Chat Server
+args:
+    - src_ip:
+        help: Sets the source ip
+        long: src-ip
+        takes_value: true
+        value_name: Source IP
+    - src_port:
+        help: Sets the source port
+        short: p
+        long: src-port
+        takes_value: true
+        value_name: Source Port
+

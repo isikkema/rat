@@ -1,0 +1,22 @@
+name: rat_client
+version: "0.1"
+author: Isaac Sikkema
+about: Rust Chat Client
+args:
+    - dst_ip:
+        help: Sets the destination ip
+        value_name: Destination IP
+        required: true
+        index: 1
+    - dst_port:
+        help: Sets the destination port
+        short: p
+        long: dst-port
+        takes_value: true
+        value_name: Destination Port
+    - name:
+        help: Sets the name
+        long: name
+        takes_value: true
+        value_name: NAME
+

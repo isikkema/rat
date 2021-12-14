@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "rat_client",
+    "rat_server",
+    "rat_config",
+    "rat_error"
+]
