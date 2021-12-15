@@ -3,65 +3,34 @@ extern crate cursive;
 extern crate lazy_static;
 #[macro_use]
 extern crate log;
-extern crate fern;
 extern crate chrono;
+extern crate fern;
 
-extern crate rat_error;
 extern crate rat_config;
+extern crate rat_error;
 
-
-use std::thread;
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::RwLock;
-use std::io::{
-    self,
-    BufRead,
-    BufReader,
-    Write,
-};
-use std::net::{
-    IpAddr,
-    SocketAddr,
-    TcpStream,
-    Shutdown,
-};
-use std::sync::mpsc::{
-    channel,
-    Sender,
-    Receiver,
-    TryRecvError,
-};
+use std::thread;
 
+use cursive::align::HAlign;
+use cursive::event::{Callback, Event, EventResult, Key::*};
+use cursive::traits::*;
+use cursive::view::scroll::ScrollStrategy;
+use cursive::view::Scrollable;
+use cursive::views::{
+    Button, Dialog, DummyView, LinearLayout, NamedView, OnEventView, Panel, ResizedView,
+    ScrollView, TextArea, TextView,
+};
 use cursive::Cursive;
 use cursive::CursiveExt;
-use cursive::traits::*;
-use cursive::align::HAlign;
-use cursive::view::Scrollable;
-use cursive::view::scroll::ScrollStrategy;
-use cursive::event::{
-    Event,
-    Callback,
-    EventResult,
-    Key::*,
-};
-use cursive::views::{
-    Panel,
-    Dialog,
-    Button,
-    TextArea,
-    TextView,
-    NamedView,
-    DummyView,
-    ScrollView,
-    ResizedView,
-    OnEventView,
-    LinearLayout,
-};
 
 use log::LevelFilter;
 
-use rat_error::*;
 use rat_config::*;
-
+use rat_error::*;
 
 #[derive(Debug)]
 enum ServerThreadCommand {
@@ -76,12 +45,10 @@ enum TuiThreadCommand {
     DisableChatbox,
 }
 
-
 fn tui_thread(
     tui_thread_rchan: Receiver<TuiThreadCommand>,
-    read_thread_schan: Sender<ServerThreadCommand>
-) -> thread::JoinHandle< Result<()> > {
-
+    read_thread_schan: Sender<ServerThreadCommand>,
+) -> thread::JoinHandle<Result<()>> {
     // Add message to chat_room
     fn add_message(siv: &mut Cursive, message: &String, name: &String) -> Result<()> {
         let mut chat_room;
@@ -91,51 +58,37 @@ fn tui_thread(
         // Find chat_room object
         chat_room = match siv.find_name::<LinearLayout>("chat_room") {
             Some(w) => w,
-            None    => {
+            None => {
                 warn!("Failed to find chat_room");
                 return Err(RatError::Tui);
             }
         };
 
-        scroll_chat_room = match
-            siv.find_name::<
-                ScrollView<
-                    NamedView<
-                        LinearLayout
-                    >
-                >
-            >("scroll_chat_room")
-        {
-            Some(w) => w,
-            None    => {
-                warn!("Failed to find scroll_chat_room");
-                return Err(RatError::Tui);
-            }
-        };
+        scroll_chat_room =
+            match siv.find_name::<ScrollView<NamedView<LinearLayout>>>("scroll_chat_room") {
+                Some(w) => w,
+                None => {
+                    warn!("Failed to find scroll_chat_room");
+                    return Err(RatError::Tui);
+                }
+            };
 
         // If last message is in view, scroll with new messages
         should_scroll = scroll_chat_room.is_at_bottom();
         if should_scroll {
             scroll_chat_room.set_scroll_strategy(ScrollStrategy::StickToBottom);
         }
- 
+
         // Add : to name
         let mut name = name.clone();
         name.push(':');
 
         // Add message to chat_room
-        chat_room.add_child(
-            TextView::new(name)
-        );
+        chat_room.add_child(TextView::new(name));
         chat_room.add_child(
             LinearLayout::horizontal()
-            .child(
-                DummyView
-                .fixed_width(4)
-            )
-            .child(
-                TextView::new(message)
-            )
+                .child(DummyView.fixed_width(4))
+                .child(TextView::new(message)),
         );
 
         Ok(())
@@ -144,10 +97,8 @@ fn tui_thread(
     // Post message to server
     fn post_message(message: &String, schan: Sender<ServerThreadCommand>) -> Result<()> {
         match schan.send(ServerThreadCommand::Write(message.to_string())) {
-            Ok(_) => {
-                Ok(())
-            },
-            Err(e)  => {
+            Ok(_) => Ok(()),
+            Err(e) => {
                 warn!("Failed to post message");
                 debug!("{:?}", e);
                 Err(RatError::SendCommand)
@@ -163,7 +114,7 @@ fn tui_thread(
         // Get chat_box object
         chat_box = match s.find_name::<TextArea>("chat_box") {
             Some(v) => v,
-            None    => {
+            None => {
                 warn!("Failed to find chat_box");
                 return Err(RatError::Tui);
             }
@@ -174,8 +125,8 @@ fn tui_thread(
 
         // Get name
         let name = match RAT_CONFIG.read() {
-            Ok(v)   => v.get_str("name")?,
-            Err(e)  => {
+            Ok(v) => v.get_str("name")?,
+            Err(e) => {
                 warn!("Failed to read config");
                 debug!("{:?}", e);
                 return Err(RatError::ConfigLock);
@@ -183,9 +134,11 @@ fn tui_thread(
         };
 
         // Get channel (through siv itself)
-        let data = s.with_user_data(|data: &mut Sender<ServerThreadCommand>| -> Sender<ServerThreadCommand> {
-            return data.clone();
-        });
+        let data = s.with_user_data(
+            |data: &mut Sender<ServerThreadCommand>| -> Sender<ServerThreadCommand> {
+                return data.clone();
+            },
+        );
 
         let schan = match data {
             Some(v) => v,
@@ -197,7 +150,7 @@ fn tui_thread(
 
         post_message(&message, schan)?;
         add_message(s, &message, &name)?;
-        chat_box.set_content("");   // Clear chat_box
+        chat_box.set_content(""); // Clear chat_box
 
         Ok(())
     }
@@ -220,18 +173,16 @@ fn tui_thread(
                 let name = v;
 
                 add_message(siv, &msg, &name)
-            },
+            }
             TuiThreadCommand::Popup(v) => {
-                siv.add_layer(
-                    Dialog::info(v.as_str())
-                );
+                siv.add_layer(Dialog::info(v.as_str()));
 
                 Ok(())
-            },
+            }
             TuiThreadCommand::DisableChatbox => {
                 let mut chat_box = match siv.find_name::<TextArea>("chat_box") {
                     Some(v) => v,
-                    None    => {
+                    None => {
                         warn!("Failed to find chat_box");
                         return Err(RatError::Tui);
                     }
@@ -239,7 +190,7 @@ fn tui_thread(
 
                 let mut send_btn = match siv.find_name::<Button>("send_btn") {
                     Some(v) => v,
-                    None    => {
+                    None => {
                         warn!("Failed to find send_btn");
                         return Err(RatError::Tui);
                     }
@@ -253,8 +204,8 @@ fn tui_thread(
                         warn!("Failed to focus chat_room");
                         debug!("{:?}", e);
                         return Err(RatError::Tui);
-                    },
-                    _ => ()
+                    }
+                    _ => (),
                 }
 
                 Ok(())
@@ -263,7 +214,7 @@ fn tui_thread(
     }
 
     let handle;
-    
+
     handle = thread::spawn(move || -> Result<()> {
         let mut siv = Cursive::default();
         let app_data = read_thread_schan.clone();
@@ -271,8 +222,8 @@ fn tui_thread(
 
         // Send name to server
         let name = match RAT_CONFIG.read() {
-            Ok(v)   => v.get_str("name")?,
-            Err(e)  => {
+            Ok(v) => v.get_str("name")?,
+            Err(e) => {
                 error!("Failed to read config");
                 debug!("{:?}", e);
                 return Err(RatError::ConfigLock);
@@ -281,27 +232,23 @@ fn tui_thread(
         post_message(&name, read_thread_schan.clone())?;
 
         // Triggered when enter is pressed inside chat_box
-        let enter_key_event_closure = move |s: &mut Cursive| {
-            match send_message(s) {
-                Err(e) => {
-                    warn!("Failed to send message");
-                    debug!("{:?}", e);
-                },
-                _ => ()
+        let enter_key_event_closure = move |s: &mut Cursive| match send_message(s) {
+            Err(e) => {
+                warn!("Failed to send message");
+                debug!("{:?}", e);
             }
+            _ => (),
         };
 
         // Triggered when <Send> button is pressed
-        let send_btn_event_closure = move |s: &mut Cursive| {
-            match send_message(s) {
-                Err(e) => {
-                    warn!("Failed to send message");
-                    debug!("{:?}", e);
-                },
-                _ => ()
+        let send_btn_event_closure = move |s: &mut Cursive| match send_message(s) {
+            Err(e) => {
+                warn!("Failed to send message");
+                debug!("{:?}", e);
             }
+            _ => (),
         };
-        
+
         // Closure to run when q is pressed globally
         let closure_schan = read_thread_schan.clone();
         let quit_key_event_closure = move |s: &mut Cursive| {
@@ -309,8 +256,8 @@ fn tui_thread(
                 Err(e) => {
                     warn!("Failed to send shutdown command");
                     debug!("{:?}", e);
-                },
-                _ => ()
+                }
+                _ => (),
             }
 
             s.quit();
@@ -323,8 +270,8 @@ fn tui_thread(
                 Err(e) => {
                     warn!("Failed to send shutdown command");
                     debug!("{:?}", e);
-                },
-                _ => ()
+                }
+                _ => (),
             }
 
             s.quit();
@@ -334,35 +281,34 @@ fn tui_thread(
         siv.add_global_callback('q', quit_key_event_closure);
 
         siv.add_fullscreen_layer(
-            Dialog::around(
-                ResizedView::with_full_screen(
-                    LinearLayout::vertical()
+            Dialog::around(ResizedView::with_full_screen(
+                LinearLayout::vertical()
                     .child(
                         Panel::new(
                             LinearLayout::vertical()
-                            .child(
-                                TextView::new("Let there be chat.")
-                                .h_align(HAlign::Center)
-                                .full_width()
-                            )
-                            .with_name("chat_room")
-                            .scrollable()
-                            .scroll_strategy(ScrollStrategy::StickToBottom)
-                            .with_name("scroll_chat_room")
+                                .child(
+                                    TextView::new("Let there be chat.")
+                                        .h_align(HAlign::Center)
+                                        .full_width(),
+                                )
+                                .with_name("chat_room")
+                                .scrollable()
+                                .scroll_strategy(ScrollStrategy::StickToBottom)
+                                .with_name("scroll_chat_room"),
                         )
-                        .full_height()
+                        .full_height(),
                     )
-                    .child(
-                        Panel::new(
-                            LinearLayout::horizontal()
+                    .child(Panel::new(
+                        LinearLayout::horizontal()
                             .child(
                                 OnEventView::new(
-                                    TextArea::new() 
-                                    .with_name("chat_box")
-                                    .fixed_height(3)
-                                    .full_width()
+                                    TextArea::new()
+                                        .with_name("chat_box")
+                                        .fixed_height(3)
+                                        .full_width(),
                                 )
-                                .on_pre_event_inner(    // Insert '\n' when Ctrl+n is pressed
+                                .on_pre_event_inner(
+                                    // Insert '\n' when Ctrl+n is pressed
                                     Event::CtrlChar('n'),
                                     move |view, _event| {
                                         let mut text_area;
@@ -370,52 +316,46 @@ fn tui_thread(
                                         let cursor;
 
                                         text_area = view
-                                        .get_inner_mut()    // ResizedView
-                                        .get_inner_mut()    // NamedView
-                                        .get_mut();         // TextArea
-                                        
+                                            .get_inner_mut() // ResizedView
+                                            .get_inner_mut() // NamedView
+                                            .get_mut(); // TextArea
+
                                         // Insert newline after cursor pos in content
                                         content = text_area.get_content().to_string();
                                         cursor = text_area.cursor();
                                         content.insert(cursor, '\n');
                                         text_area.set_content(content);
-                                        text_area.set_cursor(cursor+1); // Move cursor after the new newline char
+                                        text_area.set_cursor(cursor + 1); // Move cursor after the new newline char
 
                                         Some(EventResult::Consumed(None))
-                                    }
+                                    },
                                 )
-                                .on_pre_event_inner(    // Send message when Enter key is pressed
+                                .on_pre_event_inner(
+                                    // Send message when Enter key is pressed
                                     Event::Key(Enter),
                                     move |_view, _event| {
-                                        Some(EventResult::Consumed(
-                                            Some(Callback::from_fn_mut(
-                                                enter_key_event_closure
-                                            ))
-                                        ))
-                                    }
-                                )
+                                        Some(EventResult::Consumed(Some(Callback::from_fn_mut(
+                                            enter_key_event_closure,
+                                        ))))
+                                    },
+                                ),
                             )
                             .child(
                                 LinearLayout::vertical()
-                                .child(
-                                    DummyView
-                                    .fixed_size((6, 1))
-                                )
-                                .child(
-                                    Button::new("Send", send_btn_event_closure)
-                                    .with_name("send_btn")
-                                    .fixed_size((6, 2))
-                                )
-                            )
-                        )
-                    )
-                )
-            )
+                                    .child(DummyView.fixed_size((6, 1)))
+                                    .child(
+                                        Button::new("Send", send_btn_event_closure)
+                                            .with_name("send_btn")
+                                            .fixed_size((6, 2)),
+                                    ),
+                            ),
+                    )),
+            ))
             .title("ChatRoom")
             .h_align(HAlign::Center)
-            .button("Quit", quit_btn_event_closure)
+            .button("Quit", quit_btn_event_closure),
         );
-        
+
         // Main TUI loop
         siv.refresh();
         loop {
@@ -423,10 +363,8 @@ fn tui_thread(
             match tui_thread_rchan.try_recv() {
                 Ok(v) => {
                     handle_command(&mut siv, v)?;
-                },
-                Err(TryRecvError::Empty) => {
-                    ()
-                },
+                }
+                Err(TryRecvError::Empty) => (),
                 Err(e) => {
                     error!("Failed to receive tui command");
                     debug!("{:?}", e);
@@ -450,8 +388,8 @@ fn tui_thread(
 fn server_thread(
     mut stream: TcpStream,
     server_thread_rchan: Receiver<ServerThreadCommand>,
-    tui_thread_schan: Sender<TuiThreadCommand>
-) -> thread::JoinHandle< Result<()> > {
+    tui_thread_schan: Sender<TuiThreadCommand>,
+) -> thread::JoinHandle<Result<()>> {
     const DELIMITER: u8 = 0x04; // EOT
 
     // Handle commands from other threads
@@ -461,7 +399,7 @@ fn server_thread(
             ServerThreadCommand::Shutdown => {
                 stream.shutdown(Shutdown::Both)?;
                 Ok(())
-            },
+            }
             ServerThreadCommand::Write(v) => {
                 // Add EOT
                 let mut msg = v;
@@ -474,7 +412,7 @@ fn server_thread(
     }
 
     let handle;
-    
+
     handle = thread::spawn(move || -> Result<()> {
         let mut num_read;
         let mut buffer;
@@ -485,10 +423,8 @@ fn server_thread(
             match server_thread_rchan.try_recv() {
                 Ok(v) => {
                     handle_command(&mut stream, v)?;
-                },
-                Err(TryRecvError::Empty) => {
-                    ()
-                },
+                }
+                Err(TryRecvError::Empty) => (),
                 Err(e) => {
                     error!("Failed to receive server command");
                     debug!("{:?}", e);
@@ -500,36 +436,36 @@ fn server_thread(
             let string_msg: String;
 
             msg = Vec::new();
-            num_read = match buffer.read_until(DELIMITER, &mut msg) { // Read until EOT or EOF
-                Ok(v)       => v,
-                Err(e)  if e.kind() == io::ErrorKind::WouldBlock => {
+            num_read = match buffer.read_until(DELIMITER, &mut msg) {
+                // Read until EOT or EOF
+                Ok(v) => v,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     // Not EOF, but no new messages
                     continue;
-                },
-                Err(e)      => {
+                }
+                Err(e) => {
                     error!("Failed to read from client");
                     debug!("{:?}", e);
                     return Err(RatError::from(e));
                 }
             };
 
-            if num_read == 0 {  // if buffer has reached EOF
+            if num_read == 0 {
+                // if buffer has reached EOF
                 break;
             }
 
             // New message
-            msg.pop();  // Remove delimeter
+            msg.pop(); // Remove delimeter
             string_msg = String::from_utf8(msg)?;
 
             trace!("Add Message: {:?}", string_msg);
-            match tui_thread_schan.send(
-                TuiThreadCommand::AddMessage(string_msg)
-            ) {
+            match tui_thread_schan.send(TuiThreadCommand::AddMessage(string_msg)) {
                 Err(e) => {
                     warn!("Failed to send AddMessage command");
                     debug!("{:?}", e);
-                },
-                _ => ()
+                }
+                _ => (),
             }
         }
 
@@ -540,13 +476,13 @@ fn server_thread(
 }
 
 fn connect_to_dst() -> Result<TcpStream> {
-    let dst_ip:     IpAddr;
-    let dst_port:   u16;
+    let dst_ip: IpAddr;
+    let dst_port: u16;
     let stream;
-    
+
     let config = match RAT_CONFIG.read() {
-        Ok(v)   => v,
-        Err(e)  => {
+        Ok(v) => v,
+        Err(e) => {
             error!("Failed to read config");
             debug!("{:?}", e);
             return Err(RatError::ConfigLock);
@@ -556,18 +492,13 @@ fn connect_to_dst() -> Result<TcpStream> {
     dst_ip = config.get_str("dst_ip")?.parse()?;
     dst_port = config.get("dst_port")?;
 
-    stream = TcpStream::connect(
-        SocketAddr::new(
-            dst_ip,
-            dst_port
-        )
-    )?;
+    stream = TcpStream::connect(SocketAddr::new(dst_ip, dst_port))?;
     stream.set_nonblocking(true)?;
 
     return Ok(stream);
 }
 
-lazy_static!{
+lazy_static! {
     static ref RAT_CONFIG: RwLock<Config> = RwLock::new(Config::default());
 }
 
@@ -579,23 +510,23 @@ fn main() {
     match set_client_config_defaults(&RAT_CONFIG) {
         Err(ref e) => {
             exit_with_error(e);
-        },
-        _ => ()
+        }
+        _ => (),
     }
 
     match parse_client_config_file(&RAT_CONFIG) {
         Err(ref e) => {
             exit_with_error(e);
-        },
-        _ => ()
+        }
+        _ => (),
     }
 
     // Initialize argument parsing with clap
     match parse_client_args(&RAT_CONFIG) {
         Err(ref e) => {
             exit_with_error(e);
-        },
-        _ => ()
+        }
+        _ => (),
     }
 
     // Read config
@@ -603,8 +534,8 @@ fn main() {
     let log_level_file;
     {
         let config = match RAT_CONFIG.read() {
-            Ok(v)   => v,
-            Err(_)  => {
+            Ok(v) => v,
+            Err(_) => {
                 exit_with_error(&RatError::ConfigLock);
                 unreachable!();
             }
@@ -621,16 +552,14 @@ fn main() {
         __log_level_stderr.make_ascii_lowercase();
         let __log_level_stderr = match __log_level_stderr.as_str() {
             "error" => LevelFilter::Error,
-            "warn"  => LevelFilter::Warn,
-            "info"  => LevelFilter::Info,
+            "warn" => LevelFilter::Warn,
+            "info" => LevelFilter::Info,
             "debug" => LevelFilter::Debug,
             "trace" => LevelFilter::Trace,
             s => {
-                exit_with_error(
-                    &RatError::UnknownOption(
-                        format!("log_level_stderr: {}", s).to_string()
-                    )
-                );
+                exit_with_error(&RatError::UnknownOption(
+                    format!("log_level_stderr: {}", s).to_string(),
+                ));
                 unreachable!();
             }
         };
@@ -647,16 +576,14 @@ fn main() {
         __log_level_file.make_ascii_lowercase();
         let __log_level_file = match __log_level_file.as_str() {
             "error" => LevelFilter::Error,
-            "warn"  => LevelFilter::Warn,
-            "info"  => LevelFilter::Info,
+            "warn" => LevelFilter::Warn,
+            "info" => LevelFilter::Info,
             "debug" => LevelFilter::Debug,
             "trace" => LevelFilter::Trace,
             s => {
-                exit_with_error(
-                    &RatError::UnknownOption(
-                        format!("log_level_file: {}", s).to_string()
-                    )
-                );
+                exit_with_error(&RatError::UnknownOption(
+                    format!("log_level_file: {}", s).to_string(),
+                ));
                 unreachable!();
             }
         };
@@ -667,16 +594,16 @@ fn main() {
     let mut base_log = fern::Dispatch::new();
 
     let stderr_log = fern::Dispatch::new()
-    .format(|out, message, record| {
-        out.finish(format_args!(
-            "{}[{}] {}",
-            chrono::Local::now().format("[%H:%M:%S]"),
-            record.level(),
-            message
-        ))
-    })
-    .level(log_level_stderr)
-    .chain(io::stderr());
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "{}[{}] {}",
+                chrono::Local::now().format("[%H:%M:%S]"),
+                record.level(),
+                message
+            ))
+        })
+        .level(log_level_stderr)
+        .chain(io::stderr());
     base_log = base_log.chain(stderr_log);
 
     match get_client_log_filename() {
@@ -687,26 +614,26 @@ fn main() {
                 Ok(v) => {
                     let log_file = v;
                     let file_log = fern::Dispatch::new()
-                    .format(|out, message, record| {
-                        out.finish(format_args!(
-                            "{}[{}][{}] {}",
-                            chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
-                            record.target(),
-                            record.level(),
-                            message
-                        ))
-                    })
-                    .level(log_level_file)
-                    .level_for("cursive", LevelFilter::Warn)
-                    .chain(log_file);
+                        .format(|out, message, record| {
+                            out.finish(format_args!(
+                                "{}[{}][{}] {}",
+                                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                                record.target(),
+                                record.level(),
+                                message
+                            ))
+                        })
+                        .level(log_level_file)
+                        .level_for("cursive", LevelFilter::Warn)
+                        .chain(log_file);
 
                     base_log = base_log.chain(file_log);
-                },
+                }
                 Err(e) => {
                     eprintln!("Failed to get log file: {:?}", e);
                 }
             }
-        },
+        }
         Err(e) => {
             eprintln!("Failed to get log filename: {:?}", e);
         }
@@ -715,18 +642,18 @@ fn main() {
     match base_log.apply() {
         Err(e) => {
             eprintln!("Failed to initialize log: {:?}", e);
-        },
-        _ => ()
+        }
+        _ => (),
     }
 
     info!("Log initialized.");
 
     // Start TCP connection.
     match connect_to_dst() {
-        Ok(v)       => {
+        Ok(v) => {
             stream = v;
-        },
-        Err(ref e)  => {
+        }
+        Err(ref e) => {
             exit_with_error(e);
             unreachable!(); // We should never get here.
         }
@@ -736,48 +663,46 @@ fn main() {
 
     // Create thread communication channels
     let (server_thread_schan, server_thread_rchan) = channel::<ServerThreadCommand>();
-    let (tui_thread_schan, tui_thread_rchan)  = channel::<TuiThreadCommand>();
+    let (tui_thread_schan, tui_thread_rchan) = channel::<TuiThreadCommand>();
 
     // Start threads
-    tui_thread_handle = tui_thread(tui_thread_rchan, server_thread_schan);                          // Cursive TUI
-    server_thread_handle = server_thread(stream, server_thread_rchan, tui_thread_schan.clone());    // Handle data to and from the server
+    tui_thread_handle = tui_thread(tui_thread_rchan, server_thread_schan); // Cursive TUI
+    server_thread_handle = server_thread(stream, server_thread_rchan, tui_thread_schan.clone()); // Handle data to and from the server
 
     // Gracefully exit
     match server_thread_handle.join() {
         Err(e) => {
             debug!("Read thread error: {:?}", e);
 
-            match tui_thread_schan.send(
-                TuiThreadCommand::Popup("Read thread panicked.".to_string())
-            ) {
+            match tui_thread_schan
+                .send(TuiThreadCommand::Popup("Read thread panicked.".to_string()))
+            {
                 Err(e) => {
                     warn!("Failed to send popup command");
                     debug!("{:?}", e);
-                },
-                _ => ()
+                }
+                _ => (),
             }
-        },
+        }
         _ => {
             info!("Connection closed.");
 
-            match tui_thread_schan.send(
-                TuiThreadCommand::Popup("Connection has been closed.".to_string())
-            ) {
+            match tui_thread_schan.send(TuiThreadCommand::Popup(
+                "Connection has been closed.".to_string(),
+            )) {
                 Err(e) => {
                     warn!("Failed to send popup command");
                     debug!("{:?}", e);
-                },
-                _ => ()
+                }
+                _ => (),
             }
 
-            match tui_thread_schan.send(
-                TuiThreadCommand::DisableChatbox
-            ) {
+            match tui_thread_schan.send(TuiThreadCommand::DisableChatbox) {
                 Err(e) => {
                     warn!("Failed to send DiableChatbox command");
                     debug!("{:?}", e);
-                },
-                _ => ()
+                }
+                _ => (),
             }
         }
     }
@@ -786,10 +711,8 @@ fn main() {
         Err(e) => {
             debug!("TUI thread error: {:?}", e);
 
-            exit_with_error(
-                &RatError::Tui
-            );
-        },
+            exit_with_error(&RatError::Tui);
+        }
         _ => {
             info!("Exiting normally.");
         }
